@@ -2,15 +2,18 @@
   manifest_version: "0.1.0",
   program: {
     image: "ghcr.io/necentt/negotiator-purple:v1.0",
-    entrypoint: "uv run src/server.py --host 0.0.0.0 --port 9009",
+    entrypoint: [
+      "uv", "run", "src/server.py",
+      "--host", "0.0.0.0",
+      "--port", "9009"
+    ],
+    env: {
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY}",
+    },
     network: {
       endpoints: [
         { name: "endpoint", port: 9009 },
       ],
-    },
-    env: {
-      OPENROUTER_API_KEY: "${secrets.OPENROUTER_API_KEY}",
-      LLM_MODEL: "${secrets.LLM_MODEL}",
     },
   },
   slots: {},
