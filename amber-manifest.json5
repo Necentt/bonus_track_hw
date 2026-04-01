@@ -8,13 +8,21 @@
       "--port", "9009"
     ],
     env: {
-      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY}",
+      OPENROUTER_API_KEY: "${config.api_key}",
     },
     network: {
       endpoints: [
         { name: "endpoint", port: 9009 },
       ],
     },
+  },
+  config_schema: {
+    type: "object",
+    properties: {
+      api_key: { type: "string", secret: true },
+    },
+    required: ["api_key"],
+    additionalProperties: false,
   },
   slots: {},
   provides: {
