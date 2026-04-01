@@ -1,0 +1,13 @@
+.env
+CLAUDE.md
+.pytest_cache/
+__pycache__/
+.vscode/
+.DS_Store
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.venv/
+.claude/
+
