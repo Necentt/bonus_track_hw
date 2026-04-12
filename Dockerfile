@@ -4,7 +4,7 @@ RUN adduser agent
 USER agent
 WORKDIR /home/agent
 
-COPY pyproject.toml uv.lock README.md ./
+COPY pyproject.toml uv.lock ./
 COPY src src
 
 RUN \

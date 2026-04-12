@@ -53,12 +53,13 @@ async def strategize(state: NegotiationState) -> NegotiationState:
 
     obs = Observation(**obs_data)
     action_type = state["action_type"]
+    history = state.get("history") or []
 
     try:
         llm = get_llm()
 
         if action_type == "propose":
-            system_prompt = build_propose_prompt(obs)
+            system_prompt = build_propose_prompt(obs, history)
             user_msg = f"Propose an allocation for round {obs.round_index}. Your valuations: {obs.valuations_self}, BATNA: {obs.batna_self}"
 
             response = await llm.ainvoke([
@@ -86,7 +87,7 @@ async def strategize(state: NegotiationState) -> NegotiationState:
                 "error": None,
             }
         else:
-            system_prompt = build_accept_prompt(obs)
+            system_prompt = build_accept_prompt(obs, history)
             offer_alloc = obs.pending_offer_allocation or []
             user_msg = f"Accept or reject? Offered items: {offer_alloc}, your BATNA: {obs.batna_self}"
 

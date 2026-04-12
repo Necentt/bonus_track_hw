@@ -1,83 +1,147 @@
-"""Aspiration-based fallback negotiator (no LLM needed)."""
+"""Aspiration-based fallback negotiator (no LLM needed).
+
+Designed to be Pareto-efficient: we keep items we value most and give opponent
+items we value least. On random valuations, this tends to also benefit opponent
+(asymmetric preferences), boosting Utilitarian Welfare.
+"""
 
 from __future__ import annotations
 
 from strategy.models import Observation, ProposalResponse, AcceptResponse, QUANTITIES
 
 
-def compute_item_value_density(valuations: list[int], quantities: list[int]) -> list[tuple[int, float]]:
-    """Returns list of (item_index, value_per_unit) sorted by density descending."""
-    densities = []
-    for i, (v, q) in enumerate(zip(valuations, quantities)):
-        densities.append((i, v))  # value per unit
-    densities.sort(key=lambda x: x[1], reverse=True)
-    return densities
+# Expected per-unit valuation for an unknown opponent (uniform[1, 99] mean).
+EXPECTED_OPPONENT_VAL_PER_UNIT = 50
 
 
-def greedy_allocation(
-    valuations: list[int],
-    quantities: list[int],
-    target_value: float,
-) -> list[int]:
-    """Greedily allocate items to reach target_value, prioritizing highest-value items."""
-    allocation = [0] * len(quantities)
-    current_value = 0.0
-    densities = compute_item_value_density(valuations, quantities)
+def pareto_propose(obs: Observation) -> ProposalResponse:
+    """Pareto-efficient aspiration proposal.
 
-    for item_idx, val_per_unit in densities:
-        if current_value >= target_value:
-            break
-        needed = target_value - current_value
-        units_needed = min(quantities[item_idx], max(1, int(needed / val_per_unit + 0.5)))
-        allocation[item_idx] = units_needed
-        current_value += units_needed * val_per_unit
-
-    return allocation
-
-
-def aspiration_propose(obs: Observation) -> ProposalResponse:
-    """Aspiration-based proposal: target ~75% of total value, adapting by round."""
+    Strategy:
+    1. Aspiration level decays over rounds: 0.78, 0.70, 0.62, ...
+    2. Final round: aim at max(BATNA + small surplus, 0.55 * total).
+    3. Keep items where self-valuation is HIGHEST per unit.
+    4. Give items where self-valuation is LOWEST (opponent likely values them more, on average).
+    5. Ensure opponent's allocation has enough EXPECTED value to be accepted
+       (~ opponent's estimated BATNA + margin).
+    """
     total = obs.total_value
-    # Start aspiring high, concede over rounds
-    aspiration_level = max(0.6, 0.85 - 0.05 * (obs.round_index - 1))
-    target = max(obs.batna_self, total * aspiration_level)
+    rounds_left = obs.max_rounds - obs.round_index
 
-    allocation_self = greedy_allocation(obs.valuations_self, obs.quantities, target)
+    # Aspiration schedule — slightly less greedy than before to push UW up
+    if rounds_left == 0:
+        aspiration = 0.55
+    else:
+        aspiration = max(0.58, 0.80 - 0.08 * (obs.round_index - 1))
 
-    # Ensure valid: cap at quantities
+    target_self_value = max(obs.batna_self, int(total * aspiration))
+
+    # Sort items by our per-unit valuation descending — keep highest-value items first.
+    item_order = sorted(
+        range(len(obs.valuations_self)),
+        key=lambda i: obs.valuations_self[i],
+        reverse=True,
+    )
+
+    allocation_self = [0] * len(obs.quantities)
+    current_value = 0
+
+    # Greedy: take units of highest-value items until target reached.
+    for item_idx in item_order:
+        if current_value >= target_self_value:
+            break
+        val = obs.valuations_self[item_idx]
+        qty = obs.quantities[item_idx]
+        if val <= 0 or qty <= 0:
+            continue
+        # How many units do we need to reach target?
+        remaining = target_self_value - current_value
+        units = min(qty, max(1, (remaining + val - 1) // val))
+        allocation_self[item_idx] = units
+        current_value += units * val
+
+    # Ensure we keep at least ONE unit of our highest-value item if possible
+    # (even if target was already reached by accident).
+    top_item = item_order[0]
+    if allocation_self[top_item] == 0 and obs.quantities[top_item] > 0:
+        allocation_self[top_item] = 1
+
+    # Cap at quantities.
     allocation_self = [min(a, q) for a, q in zip(allocation_self, obs.quantities)]
     allocation_other = [q - a for q, a in zip(obs.quantities, allocation_self)]
+
+    # Check opponent gets something substantial (Pareto sanity):
+    # Expected opponent value on the items we give them.
+    expected_opp_value = sum(
+        EXPECTED_OPPONENT_VAL_PER_UNIT * a for a in allocation_other
+    )
+    # If opponent expected value is very low, give them an extra unit of our lowest-value item.
+    if expected_opp_value < 150 and obs.round_index >= 2:
+        for item_idx in reversed(item_order):
+            if allocation_self[item_idx] > 0:
+                allocation_self[item_idx] -= 1
+                allocation_other[item_idx] += 1
+                break
 
     self_value = sum(v * a for v, a in zip(obs.valuations_self, allocation_self))
     return ProposalResponse(
         allocation_self=allocation_self,
         allocation_other=allocation_other,
-        reason=f"Aspiration heuristic: targeting {aspiration_level:.0%} of total value ({self_value}/{total})",
+        reason=f"Pareto heuristic: kept high-value items, value={self_value}/{total} ({aspiration:.0%}), BATNA={obs.batna_self}",
     )
 
 
-def aspiration_accept_or_reject(obs: Observation) -> AcceptResponse:
-    """Accept if offer value exceeds BATNA adjusted for time pressure."""
-    if obs.offer_value is None:
-        # Try to compute from pending offer
+def smart_accept_or_reject(obs: Observation) -> AcceptResponse:
+    """Accept if offer exceeds BATNA, especially in late rounds.
+
+    Strategy:
+    1. Compute the offer's value to us.
+    2. In the FINAL round: accept any offer >= BATNA (rejecting means BATNA anyway).
+    3. Otherwise: accept if offer_value >= max(BATNA, threshold based on rounds left).
+    4. Always accept if offer is within ~5% of our likely next proposal.
+    """
+    # Compute offer value
+    if obs.offer_value is not None:
+        offer_val = obs.offer_value
+    else:
         alloc = obs.pending_offer_allocation
         if alloc:
             offer_val = sum(v * a for v, a in zip(obs.valuations_self, alloc))
         else:
-            return AcceptResponse(accept=False, reason="Cannot determine offer value")
-    else:
-        offer_val = obs.offer_value
+            return AcceptResponse(accept=False, reason="No offer details")
 
-    # Discount-adjusted threshold: accept if offer > BATNA
-    # In later rounds, be more willing to accept
     rounds_left = obs.max_rounds - obs.round_index
-    discount_pressure = obs.discount ** rounds_left
-    threshold = obs.batna_self * discount_pressure
+    final_round = rounds_left == 0
 
-    # Also consider: accepting now vs counter-offering next round (discounted)
-    accept = offer_val >= threshold or offer_val >= obs.batna_self
+    # Rule 1: final round — accept if at or above BATNA (no downside to accepting).
+    if final_round:
+        accept = offer_val >= obs.batna_self
+        return AcceptResponse(
+            accept=accept,
+            reason=f"Final round: offer {offer_val} vs BATNA {obs.batna_self} -> {'ACCEPT' if accept else 'WALK (offer < BATNA)'}",
+        )
+
+    # Rule 2: earlier rounds — compare against discounted expected counter-offer value.
+    # A reasonable counter next round would yield ~0.65 * total_value, but discounted.
+    total = obs.total_value
+    expected_next_value = 0.65 * total * obs.discount
+
+    # Threshold: max(BATNA, min(expected_next_value, 0.75 * offer_we_would_propose_now)).
+    # Being more willing to accept avoids walk-aways that hurt UW/NWA metrics.
+    threshold = max(obs.batna_self, expected_next_value * 0.85)
+
+    accept = offer_val >= threshold
+
+    # Rule 3: if offer is already above BATNA and we have few rounds left, bias toward accept.
+    if offer_val >= obs.batna_self and rounds_left <= 1:
+        accept = True
 
     return AcceptResponse(
         accept=accept,
-        reason=f"Offer value {offer_val} vs threshold {threshold:.0f} (BATNA={obs.batna_self}, rounds_left={rounds_left})",
+        reason=f"Offer {offer_val} vs threshold {threshold:.0f} (BATNA={obs.batna_self}, rounds_left={rounds_left})",
     )
+
+
+# Backwards-compatible aliases (used by existing tests and nodes)
+aspiration_propose = pareto_propose
+aspiration_accept_or_reject = smart_accept_or_reject

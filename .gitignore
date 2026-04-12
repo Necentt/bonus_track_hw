@@ -10,4 +10,4 @@ __pycache__/
 .env.production.local
 .venv/
 .claude/
-
+*.local
