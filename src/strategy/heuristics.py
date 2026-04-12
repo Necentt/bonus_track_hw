@@ -121,20 +121,34 @@ def smart_accept_or_reject(obs: Observation) -> AcceptResponse:
             reason=f"Final round: offer {offer_val} vs BATNA {obs.batna_self} -> {'ACCEPT' if accept else 'WALK (offer < BATNA)'}",
         )
 
-    # Rule 2: earlier rounds — compare against discounted expected counter-offer value.
-    # A reasonable counter next round would yield ~0.65 * total_value, but discounted.
+    # Rule 2: clearly above BATNA — accept. Rejection cascades hurt UW/NWA too much.
+    if offer_val >= 1.10 * obs.batna_self:
+        return AcceptResponse(
+            accept=True,
+            reason=f"Offer {offer_val} >= 1.10 * BATNA {obs.batna_self}: accept to secure welfare.",
+        )
+
+    # Rule 3: clearly below BATNA — reject.
+    if offer_val < 0.85 * obs.batna_self:
+        return AcceptResponse(
+            accept=False,
+            reason=f"Offer {offer_val} < 0.85 * BATNA {obs.batna_self}: exploitative, reject.",
+        )
+
+    # Rule 4: borderline (between 0.85 and 1.10 BATNA).
+    # Accept if limited rounds remain — can't recover from walk-away.
+    if rounds_left <= 1:
+        accept = offer_val >= obs.batna_self
+        return AcceptResponse(
+            accept=accept,
+            reason=f"Borderline {offer_val} near BATNA {obs.batna_self}, {rounds_left} rounds left: {'ACCEPT' if accept else 'WALK'}",
+        )
+
+    # Rule 5: more rounds left, compare to EV of rejection.
     total = obs.total_value
-    expected_next_value = 0.65 * total * obs.discount
-
-    # Threshold: max(BATNA, min(expected_next_value, 0.75 * offer_we_would_propose_now)).
-    # Being more willing to accept avoids walk-aways that hurt UW/NWA metrics.
-    threshold = max(obs.batna_self, expected_next_value * 0.85)
-
+    expected_next = 0.6 * total * obs.discount
+    threshold = max(obs.batna_self, expected_next * 0.7)
     accept = offer_val >= threshold
-
-    # Rule 3: if offer is already above BATNA and we have few rounds left, bias toward accept.
-    if offer_val >= obs.batna_self and rounds_left <= 1:
-        accept = True
 
     return AcceptResponse(
         accept=accept,
