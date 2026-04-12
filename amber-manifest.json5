@@ -1,7 +1,7 @@
 {
   manifest_version: "0.1.0",
   program: {
-    image: "ghcr.io/necentt/negotiator-purple:v1.2",
+    image: "ghcr.io/necentt/negotiator-purple:v1.3",
     entrypoint: [
       "uv", "run", "src/server.py",
       "--host", "0.0.0.0",

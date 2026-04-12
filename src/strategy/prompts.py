@@ -63,47 +63,30 @@ Constraints:
 - sum(valuation_self[i] * allocation_self[i]) >= {batna_self}"""
 
 
-ACCEPT_SYSTEM = """You are an expert negotiator deciding whether to accept or reject an offer.
+ACCEPT_SYSTEM = """You are deciding whether to accept or reject an offer in a multi-round bargaining game.
 
 ## Game Rules
 - 3 item types with quantities {quantities}.
-- Your valuations private. Opponent's unknown.
-- If reject: you counter-offer next round, all future payoffs discounted by gamma={discount}.
-- If no deal by final round: both get BATNA.
+- If you reject, you counter-propose next round; future payoffs discounted by gamma={discount}.
+- If no deal by final round, both players get their BATNA.
 
-## Your Situation
+## Situation
 - Your valuations: {valuations_self}
 - Your BATNA: {batna_self}
-- Discount: {discount}
-- Round: {round_index} of {max_rounds}
-- Rounds remaining after this: {rounds_left}
+- Round: {round_index} of {max_rounds}, rounds remaining after this: {rounds_left}
 
 ## The Offer
-- Items you receive: {offer_allocation}
-- Value to YOU: {offer_value}
-- Items opponent keeps: {counter_allocation}
+- You receive items: {offer_allocation}
+- Value to you: {offer_value}
 
-## CRITICAL: Err on the Side of ACCEPTING
-The benchmark scores on combined welfare (UW, NW, NWA). A rejected-then-no-deal outcome is TERRIBLE for your score — both players drop to BATNA, killing UW%. Accepting a mediocre-but-positive offer almost always beats walking away.
+## Decision Rule (apply strictly, in order)
+1. If rounds_left == 0: accept iff offer_value >= BATNA.
+2. Else accept iff offer_value >= threshold, where
+   threshold = max(BATNA, {expected_counter} * {discount}).
+   This is the discounted expected value of a reasonable counter next round.
+3. Otherwise reject.
 
-## Decision Rule (follow in order)
-1. **Final round** (rounds_left == 0): ACCEPT if offer_value >= BATNA. No downside.
-2. **offer_value >= 1.10 * BATNA**: ACCEPT. You're strictly better than your fallback, and counters risk rejection cascades.
-3. **offer_value < BATNA and offer_value < 0.85 * BATNA**: REJECT. Clearly exploitative.
-4. **Borderline case** (offer between 0.85*BATNA and 1.10*BATNA):
-   - If rounds_left <= 1: ACCEPT (limited time to recover via counter).
-   - Otherwise: reject only if you could realistically counter-propose something yielding offer_value * {acceptance_boost:.2f} or more (i.e., recovering the discount loss).
-5. **Never reject just because you think you "deserve more"** unless you have concrete reason (e.g., opponent's prior offer was meaningfully better).
-
-## Expected Value of Rejection (EV calculation)
-- If you reject, next round you counter-propose (or opponent walks).
-- Best plausible counter value ≈ {expected_counter}, discounted to {discounted_expected_counter}.
-- Risk of opponent rejecting your counter: moderate.
-- So EV(reject) ≈ max(BATNA, 0.7 * {discounted_expected_counter}).
-- ACCEPT if offer_value >= EV(reject).
-
-## History Context
-{history_context}
+Do not apply extra biases. Play the deterministic rule above.
 
 ## Response Format
 Return ONLY valid JSON:
@@ -176,8 +159,9 @@ def build_propose_prompt(obs, history: list[dict] | None = None) -> str:
 
 
 def build_accept_prompt(obs, history: list[dict] | None = None) -> str:
+    # history intentionally unused — accept/reject must be deterministic
+    # w.r.t. current observation to stay near Nash equilibrium (low MENE).
     offer_alloc = obs.pending_offer_allocation or []
-    counter_alloc = (obs.pending_offer or {}).get("offer_allocation_self", []) if obs.pending_offer else []
 
     if offer_alloc:
         offer_val = sum(v * a for v, a in zip(obs.valuations_self, offer_alloc))
@@ -187,9 +171,6 @@ def build_accept_prompt(obs, history: list[dict] | None = None) -> str:
         offer_val = 0
 
     expected_counter = int(obs.total_value * 0.6)
-    discounted_expected_counter = int(expected_counter * obs.discount)
-    # Boost factor: how much MORE a counter must yield to justify rejection
-    acceptance_boost = 1.0 / max(obs.discount, 0.5)
 
     return ACCEPT_SYSTEM.format(
         quantities=obs.quantities,
@@ -201,9 +182,5 @@ def build_accept_prompt(obs, history: list[dict] | None = None) -> str:
         rounds_left=obs.max_rounds - obs.round_index,
         offer_allocation=offer_alloc,
         offer_value=offer_val,
-        counter_allocation=counter_alloc,
         expected_counter=expected_counter,
-        discounted_expected_counter=discounted_expected_counter,
-        acceptance_boost=acceptance_boost,
-        history_context=_format_history(history or []),
     )

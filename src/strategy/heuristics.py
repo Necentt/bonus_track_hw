@@ -121,33 +121,11 @@ def smart_accept_or_reject(obs: Observation) -> AcceptResponse:
             reason=f"Final round: offer {offer_val} vs BATNA {obs.batna_self} -> {'ACCEPT' if accept else 'WALK (offer < BATNA)'}",
         )
 
-    # Rule 2: clearly above BATNA — accept. Rejection cascades hurt UW/NWA too much.
-    if offer_val >= 1.10 * obs.batna_self:
-        return AcceptResponse(
-            accept=True,
-            reason=f"Offer {offer_val} >= 1.10 * BATNA {obs.batna_self}: accept to secure welfare.",
-        )
-
-    # Rule 3: clearly below BATNA — reject.
-    if offer_val < 0.85 * obs.batna_self:
-        return AcceptResponse(
-            accept=False,
-            reason=f"Offer {offer_val} < 0.85 * BATNA {obs.batna_self}: exploitative, reject.",
-        )
-
-    # Rule 4: borderline (between 0.85 and 1.10 BATNA).
-    # Accept if limited rounds remain — can't recover from walk-away.
-    if rounds_left <= 1:
-        accept = offer_val >= obs.batna_self
-        return AcceptResponse(
-            accept=accept,
-            reason=f"Borderline {offer_val} near BATNA {obs.batna_self}, {rounds_left} rounds left: {'ACCEPT' if accept else 'WALK'}",
-        )
-
-    # Rule 5: more rounds left, compare to EV of rejection.
+    # Deterministic, near-equilibrium rule: accept iff offer_value exceeds
+    # max(BATNA, discounted expected value of a reasonable counter-offer).
     total = obs.total_value
     expected_next = 0.6 * total * obs.discount
-    threshold = max(obs.batna_self, expected_next * 0.7)
+    threshold = max(obs.batna_self, expected_next * 0.85)
     accept = offer_val >= threshold
 
     return AcceptResponse(
