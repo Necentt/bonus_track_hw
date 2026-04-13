@@ -1,39 +1,37 @@
-"""LangGraph negotiation pipeline."""
+"""LangGraph negotiation pipeline.
+
+v2.0: Deterministic aspiration is the primary strategy. LLM is only a safety
+net when the observation cannot be parsed (rare). This keeps our play inside
+the Nash equilibrium support and drives MENE Regret → 0.
+"""
 
 from langgraph.graph import StateGraph, END
 
 from graph.state import NegotiationState
-from graph.nodes import parse_observation, strategize, format_response, fallback
-
-
-def _route_after_strategize(state: NegotiationState) -> str:
-    if state.get("error"):
-        return "fallback"
-    return "format"
-
-
-def _route_after_format(state: NegotiationState) -> str:
-    if state.get("error"):
-        return "fallback"
-    return END
+from graph.nodes import parse_observation, heuristic_decide, format_response, llm_fallback
 
 
 def build_negotiation_graph():
     graph = StateGraph(NegotiationState)
 
     graph.add_node("parse", parse_observation)
-    graph.add_node("strategize", strategize)
+    graph.add_node("decide", heuristic_decide)
     graph.add_node("format", format_response)
-    graph.add_node("fallback", fallback)
+    graph.add_node("llm_fallback", llm_fallback)
 
     graph.set_entry_point("parse")
 
+    # If we have an observation → deterministic heuristic. Otherwise → LLM fallback.
     graph.add_conditional_edges(
         "parse",
-        lambda state: "fallback" if state.get("error") and not state.get("observation") else "strategize",
+        lambda state: "decide" if state.get("observation") else "llm_fallback",
     )
-    graph.add_conditional_edges("strategize", _route_after_strategize)
-    graph.add_conditional_edges("format", _route_after_format)
-    graph.add_edge("fallback", END)
+    # Heuristic is deterministic and always produces valid output → format.
+    graph.add_edge("decide", "format")
+    graph.add_conditional_edges(
+        "format",
+        lambda state: "llm_fallback" if state.get("error") else END,
+    )
+    graph.add_edge("llm_fallback", END)
 
     return graph.compile()
